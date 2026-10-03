@@ -86,6 +86,11 @@ class Api:
         add("POST", "/api/arm", self._arm)
         add("POST", "/api/position", self._position)
         add("POST", "/api/sequence", self._sequence)
+        add("POST", "/api/sequence/report", self._sequence_report)
+        add("POST", "/api/sequence/report-batch", self._sequence_report_batch)
+        add("POST", "/api/sequence/pump", self._sequence_pump)
+        add("GET", "/api/sequence/gate", self._sequence_gate)
+        add("GET", "/api/sequence/history", self._sequence_history)
         add("POST", "/api/cycle", self._cycle)
         add("POST", "/api/sweep", self._sweep)
         add("POST", "/api/dwell", self._dwell)
@@ -239,6 +244,48 @@ class Api:
     def _sequence(self, params: dict, body: dict) -> dict:
         return self._platform.sequence_verdict(
             _as_int(body, "previous", 0), _as_int(body, "step", 1)
+        )
+
+    def _sequence_report(self, params: dict, body: dict) -> dict:
+        return self._platform.report_sequence(
+            _require(body, "source"),
+            _as_int(body, "raw", 0),
+            key=str(body.get("key", "line")) or "line",
+            at=body.get("at"),
+            event_ref=str(body.get("event_ref", "")),
+        )
+
+    def _sequence_report_batch(self, params: dict, body: dict) -> dict:
+        reports = body.get("reports")
+        if not isinstance(reports, list) or not reports:
+            raise RailError("reports 必须是非空数组", component="console")
+        normalized: list[dict] = []
+        for item in reports:
+            if not isinstance(item, dict):
+                raise RailError("每条上报必须是对象", component="console")
+            normalized.append(
+                {
+                    "source": _require(item, "source"),
+                    "raw": _as_int(item, "raw", 0),
+                    "key": str(item.get("key", "line")) or "line",
+                    "at": item.get("at"),
+                    "event_ref": str(item.get("event_ref", "")),
+                }
+            )
+        return self._platform.report_sequence_batch(normalized)
+
+    def _sequence_pump(self, params: dict, body: dict) -> dict:
+        return self._platform.pump_sequences(
+            str(body.get("key", "line")) or "line", now=body.get("at")
+        )
+
+    def _sequence_gate(self, params: dict, body: dict) -> dict:
+        return self._platform.sequence_gate(str(params.get("key", "line")) or "line")
+
+    def _sequence_history(self, params: dict, body: dict) -> dict:
+        return self._platform.sequence_history(
+            str(params.get("key", "line")) or "line",
+            limit=int(params.get("limit", 50)),
         )
 
     def _cycle(self, params: dict, body: dict) -> dict:

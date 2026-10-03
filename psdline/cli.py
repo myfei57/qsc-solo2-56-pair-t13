@@ -81,6 +81,10 @@ def _cmd_demo(args: argparse.Namespace) -> int:
     batched = platform.batch_open(args.station)
     renumber = platform.renumber(args.station, _mirror_mapping(platform, args.station))
     sequence = platform.sequence_verdict(65534, 4)
+    # 多采集来源序号：两路相位不同，先缓冲再对齐判定。
+    seq_a = platform.report_sequence("A", 65534)
+    seq_b = platform.report_sequence("B", 4000)
+    seq_gate = platform.sequence_gate("line")
     dwell = platform.register_dwell(args.train, 45.0, args.station)
     route = platform.assign_route(args.train, args.station, _next_station(platform, args.station), 1200)
     departure = platform.depart(args.train, args.station)
@@ -107,6 +111,7 @@ def _cmd_demo(args: argparse.Namespace) -> int:
         "fault": fault,
         "cleared": cleared,
         "sequence": sequence,
+        "multi_sequence": {"a": seq_a, "gate": seq_gate},
         "dwell": dwell,
         "route": route,
         "departure": departure,

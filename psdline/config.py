@@ -88,6 +88,17 @@ class InterlockSection:
 
 
 @dataclass(frozen=True)
+class SequenceSection:
+    """多采集来源序号判定。"""
+
+    policy: str = "primary"
+    primary_source: str = "A"
+    sources: tuple[str, ...] = ("A", "B")
+    order_wait_s: float = 2.0
+    buffer_capacity: int = 256
+
+
+@dataclass(frozen=True)
 class QuotaSection:
     """运行配额。"""
 
@@ -122,6 +133,7 @@ class PlatformConfig:
     gap: GapSection = field(default_factory=GapSection)
     signal: SignalSection = field(default_factory=SignalSection)
     interlock: InterlockSection = field(default_factory=InterlockSection)
+    sequence: SequenceSection = field(default_factory=SequenceSection)
     quota: QuotaSection = field(default_factory=QuotaSection)
     audit: AuditSection = field(default_factory=AuditSection)
     console: ConsoleSection = field(default_factory=ConsoleSection)
@@ -165,6 +177,16 @@ class PlatformConfig:
             raise ConfigError("序号模数固定为 65536", component="config")
         if not 0 < self.interlock.max_locked_ratio <= 1:
             raise ConfigError("锁定比例上限必须落在 (0, 1]", component="config")
+        if self.sequence.policy not in ("primary", "quorum"):
+            raise ConfigError("序号判定策略只支持 primary 或 quorum", component="config")
+        if not self.sequence.sources:
+            raise ConfigError("序号采集来源至少一个", component="config")
+        if self.sequence.primary_source not in self.sequence.sources:
+            raise ConfigError("序号主源必须在采集来源列表里", component="config")
+        if self.sequence.order_wait_s <= 0:
+            raise ConfigError("乱序缓冲等待时间必须为正", component="config")
+        if self.sequence.buffer_capacity <= 0:
+            raise ConfigError("乱序缓冲容量必须为正", component="config")
         if self.quota.arrival_limit <= 0 or self.quota.depart_limit <= 0:
             raise ConfigError("运行配额必须为正", component="config")
         if self.audit.journal_segment <= 0:
@@ -189,6 +211,8 @@ def _section(cls, payload: object):
     kwargs = {key: value for key, value in payload.items() if key in known}
     if cls is NamespaceSection and "stations" in kwargs:
         kwargs["stations"] = tuple(str(item) for item in kwargs["stations"])
+    if cls is SequenceSection and "sources" in kwargs:
+        kwargs["sources"] = tuple(str(item) for item in kwargs["sources"])
     return cls(**kwargs)
 
 
@@ -211,6 +235,10 @@ def config_to_mapping(config: PlatformConfig) -> dict:
         "gap": dict(config.gap.__dict__),
         "signal": dict(config.signal.__dict__),
         "interlock": dict(config.interlock.__dict__),
+        "sequence": {
+            **dict(config.sequence.__dict__),
+            "sources": list(config.sequence.sources),
+        },
         "quota": dict(config.quota.__dict__),
         "audit": dict(config.audit.__dict__),
         "console": dict(config.console.__dict__),
@@ -231,6 +259,7 @@ def config_from_mapping(payload: dict) -> PlatformConfig:
         gap=_section(GapSection, payload.get("gap")),
         signal=_section(SignalSection, payload.get("signal")),
         interlock=_section(InterlockSection, payload.get("interlock")),
+        sequence=_section(SequenceSection, payload.get("sequence")),
         quota=_section(QuotaSection, payload.get("quota")),
         audit=_section(AuditSection, payload.get("audit")),
         console=_section(ConsoleSection, payload.get("console")),

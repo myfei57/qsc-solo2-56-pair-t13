@@ -46,6 +46,7 @@ from .ns import Namespace, NamespaceRegistry
 from .platform import MappingRegistry, adjacent, group_keys, physical_groups, resolve
 from .psd import LockoutRegistry, PSD, PSDRegistry, sweep_station
 from .quota import QuotaRegistry
+from .sequence import Observation, SequenceMonitor
 from .sig import SignalController, aspect_of, depart_checked, refresh_position, signal_summary
 from .station import (
     DoorZone,
@@ -128,6 +129,16 @@ class Platform:
         self.mappings = MappingRegistry(store)
         self.gaps = GapRegistry(store)
         self.quotas = QuotaRegistry(store)
+        seq_cfg = self.config.sequence
+        self.sequences = SequenceMonitor(
+            store,
+            self.clock,
+            policy=seq_cfg.policy,
+            primary_source=seq_cfg.primary_source,
+            sources=tuple(seq_cfg.sources),
+            order_wait_s=seq_cfg.order_wait_s,
+            buffer_capacity=seq_cfg.buffer_capacity,
+        )
         self.commands = CommandLog(store)
         self.doors = DoorController(
             store, self.align, self.commands, self.gates, self.lockouts
@@ -490,6 +501,20 @@ class Platform:
                 "detail": {"train_id": train_id, "state": gap_state},
             }
         )
+        # 先冲刷等待中的多路序号，再读门控：判定、审计、门控同读一份结果。
+        for flushed in self.sequences.pump_all(self.clock.now()):
+            self._audit_sequence(flushed)
+        latest_sequence = self.sequences.latest("line")
+        if latest_sequence is not None and not latest_sequence.accepted:
+            report = {
+                "ok": False,
+                "train_id": train_id,
+                "station_id": station_id,
+                "steps": steps,
+                "violations": [f"门控序号未放行: {latest_sequence.reason}"],
+            }
+            summary = self._record_operation(op_id, "depart", report)
+            return {**report, **summary}
         verdict = depart_checked(self.signals, self.store, self.gaps, train_id, self.clock.now())
         if not verdict["ok"]:
             report = {
@@ -608,7 +633,11 @@ class Platform:
         return {**outcome, "violations": [] if outcome["ok"] else [outcome["reason"]]}
 
     def sequence_verdict(self, previous: int, step: int) -> dict:
-        """推进门控事件序号并给出回绕判定。"""
+        """兼容旧入口：纯模运算推进并判回绕（不写多来源状态）。
+
+        新现场请用 :meth:`report_sequence`；这里保留只是为了让既有控制台/演示脚本
+        的单链路自检继续可用，审计仍记一条 ``sequence_verdict``。
+        """
 
         current = next_sequence(previous, step)
         verdict = verdict_of(previous, current)
@@ -621,6 +650,124 @@ class Platform:
             advanced=verdict.advanced,
         )
         return {"ok": verdict.advanced, "verdict": verdict.as_dict(), "violations": [] if verdict.advanced else [verdict.reason]}
+
+    def report_sequence(
+        self,
+        source: str,
+        raw: int,
+        *,
+        key: str = "line",
+        at: float | None = None,
+        event_ref: str = "",
+    ) -> dict:
+        """登记一路采集源上报，判定、审计、门控读同一份结果。
+
+        仅进入乱序缓冲、尚未到齐时返回 ``ok=True`` 且 ``pending=True``；冲刷出最终
+        结论时 ``pending=False``，并把同一条结果写进审计流水（同一 ``event_id``）。
+        """
+
+        result = self.sequences.report(
+            Observation(source=source, raw=raw, key=key, at=at, event_ref=event_ref)
+        )
+        if result is None:
+            return {
+                "ok": True,
+                "pending": True,
+                "key": key,
+                "source": source,
+                "raw": raw,
+                "violations": [],
+            }
+        self._audit_sequence(result)
+        return {
+            "ok": result.accepted,
+            "pending": False,
+            "key": key,
+            "source": source,
+            "raw": raw,
+            "event_id": result.event_id,
+            "verdict": result.as_dict(),
+            "violations": [] if result.accepted else [result.reason],
+        }
+
+    def report_sequence_batch(self, reports: list[dict]) -> dict:
+        """并发安全地批量上报多路报告，返回各自的即时结论与冲刷出的最终结果。"""
+
+        immediate: list[dict] = []
+        observations: list[Observation] = []
+        for item in reports:
+            source = str(item.get("source", ""))
+            key = str(item.get("key", "line")) or "line"
+            raw = int(item.get("raw", 0))
+            observations.append(
+                Observation(
+                    source=source,
+                    raw=raw,
+                    key=key,
+                    at=item.get("at"),
+                    event_ref=str(item.get("event_ref", "")),
+                )
+            )
+            immediate.append({"source": source, "key": key, "raw": raw})
+        flushed = self.sequences.report_many(observations)
+        for result in flushed:
+            self._audit_sequence(result)
+        return {
+            "ok": all(result.accepted for result in flushed),
+            "received": len(observations),
+            "flushed": [result.as_dict() for result in flushed],
+            "immediate": immediate,
+            "violations": [result.reason for result in flushed if not result.accepted],
+        }
+
+    def pump_sequences(self, key: str = "line", now: float | None = None) -> dict:
+        """推进乱序缓冲，冲刷已到等待时限的序号（控制周期也会自动调用）。"""
+
+        flushed = self.sequences.pump(key, now=now)
+        for result in flushed:
+            self._audit_sequence(result)
+        return {
+            "ok": all(result.accepted for result in flushed),
+            "key": key,
+            "flushed": [result.as_dict() for result in flushed],
+            "violations": [result.reason for result in flushed if not result.accepted],
+        }
+
+    def sequence_gate(self, key: str = "line") -> dict:
+        """门控读取口：与判定、审计同读最近一条结果。"""
+
+        result = self.sequences.latest(key)
+        return {
+            "key": key,
+            "clear": self.sequences.gate_clear(key),
+            "watermark": self.sequences.watermark(key),
+            "pending": self.sequences.pending(key),
+            "latest": result.as_dict() if result is not None else None,
+        }
+
+    def sequence_history(self, key: str = "line", limit: int = 50) -> dict:
+        """返回某链路已落盘的序号判定历史（读同一份不可变结果）。"""
+
+        results = self.sequences.history(key, limit=limit)
+        return {"key": key, "results": [result.as_dict() for result in results]}
+
+    def _audit_sequence(self, result) -> None:
+        """把一条最终序号判定写进审计流水，携带同一 event_id 供门控回溯。"""
+
+        kind = "sequence_accepted" if result.accepted else "sequence_rejected"
+        self.audit.record(
+            kind,
+            "",
+            "",
+            at=result.at,
+            event_id=result.event_id,
+            sequence_key=result.key,
+            normalized=result.normalized,
+            reason=result.reason,
+            policy=result.policy,
+            sources=",".join(result.sources),
+            advance_votes=",".join(result.advance_votes),
+        )
 
     def batch_open(self, station_id: str) -> dict:
         """按布局里程顺序批量开门。"""
@@ -675,6 +822,9 @@ class Platform:
             return {"ok": False, "violations": ["步长必须为正"], "cycle": self._cycles}
         self._cycles += 1
         moment = self.clock.now()
+        # 控制周期驱动乱序缓冲：到等待时限的序号在此时冲刷并出最终结论。
+        for flushed in self.sequences.pump_all(moment):
+            self._audit_sequence(flushed)
         stale = [
             train.id for train in self.trains.list() if self.positions.stale(train.id, moment)
         ]
@@ -697,6 +847,7 @@ class Platform:
             "can_release_depart": interlock["can_release_depart"],
             "ready_trains": holding,
             "gaps": gap_summary(self.gaps, [train.id for train in self.trains.list()]),
+            "sequence": self.sequences.status(),
             "violations": [],
         }
 
@@ -742,6 +893,8 @@ class Platform:
                 self.faults, self.gates, self.config.interlock.max_locked_ratio
             ),
             "gaps": gap_summary(self.gaps, ids),
+            "sequence": self.sequences.status(),
+            "sequence_gate": self.sequence_gate("line"),
             "quota": {
                 ARRIVAL: self.quotas.status(ARRIVAL),
                 DEPART: self.quotas.status(DEPART),

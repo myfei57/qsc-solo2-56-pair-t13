@@ -73,3 +73,30 @@ def test_with_storage_root_replaces_directory():
 def test_console_section_defaults():
     section = ConsoleSection()
     assert (section.host, section.port) == ("127.0.0.1", 8080)
+
+
+def test_sequence_section_defaults_and_validation():
+    config = default_config()
+    assert config.sequence.policy == "primary"
+    assert config.sequence.sources == ("A", "B")
+    assert config.sequence.primary_source == "A"
+    assert config.sequence.order_wait_s > 0
+
+    payload = config_to_mapping(config)
+    restored = config_from_mapping(payload)
+    assert restored.sequence == config.sequence  # tuple 字段也能往返
+
+    bad_policy = config_to_mapping(config)
+    bad_policy["sequence"]["policy"] = "byzantine"
+    with pytest.raises(ConfigError):
+        config_from_mapping(bad_policy)
+
+    bad_primary = config_to_mapping(config)
+    bad_primary["sequence"]["primary_source"] = "Z"
+    with pytest.raises(ConfigError):
+        config_from_mapping(bad_primary)
+
+    bad_wait = config_to_mapping(config)
+    bad_wait["sequence"]["order_wait_s"] = 0
+    with pytest.raises(ConfigError):
+        config_from_mapping(bad_wait)

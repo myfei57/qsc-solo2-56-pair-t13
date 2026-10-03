@@ -73,6 +73,47 @@ def test_sequence_verdict_handles_rollover(platform):
     assert replay["violations"] == ["replay"]
 
 
+def test_multi_source_sequence_aligns_and_shares_one_result(platform):
+    # 两路相位不同，首报先缓冲，第二路补齐出结论。
+    assert platform.report_sequence("A", 1000)["pending"] is True
+    paired = platform.report_sequence("B", 5000)
+    assert paired["ok"] is True and paired["verdict"]["normalized"] == 0
+    # 门控与审计读的是同一条结果（同一 event_id）。
+    event_id = paired["event_id"]
+    assert platform.sequence_gate("line")["latest"]["event_id"] == event_id
+    audit = [e for e in platform.audit.list() if e.detail.get("event_id") == event_id]
+    assert len(audit) == 1 and audit[0].kind == "sequence_accepted"
+
+
+def test_replayed_sequence_blocks_depart(platform):
+    platform.arrive("T01", "ST1", 0)
+    platform.check_gap("T01")
+    platform.report_sequence("A", 10)
+    platform.report_sequence("B", 70)
+    assert platform.depart("T01", "ST1")["ok"] is True
+
+    platform.arrive("T02", "ST1", 0)
+    platform.check_gap("T02")
+    platform.report_sequence("A", 11)
+    platform.report_sequence("B", 71)
+    replay = platform.report_sequence("A", 10)
+    assert replay["ok"] is False and replay["violations"] == ["replay"]
+    blocked = platform.depart("T02", "ST1")
+    assert blocked["ok"] is False
+    assert any("门控序号未放行" in v for v in blocked["violations"])
+
+
+def test_sequence_out_of_order_buffers_then_accepts(platform):
+    platform.report_sequence("A", 100)
+    platform.report_sequence("B", 500)
+    # B 的下一条先到，先缓冲等待 A。
+    assert platform.report_sequence("B", 501)["pending"] is True
+    assert platform.sequence_gate("line")["pending"] == 1
+    result = platform.report_sequence("A", 101)
+    assert result["ok"] is True and result["verdict"]["normalized"] == 1
+    assert platform.sequence_gate("line")["pending"] == 0
+
+
 def test_refresh_position_rejects_out_of_range(platform):
     accepted = platform.refresh_position("T01", 12)
     assert accepted["ok"] is True

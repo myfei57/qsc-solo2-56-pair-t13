@@ -80,7 +80,21 @@ def _cmd_demo(args: argparse.Namespace) -> int:
     cleared = platform.clear_fault(_first_gate(platform, args.station))
     batched = platform.batch_open(args.station)
     renumber = platform.renumber(args.station, _mirror_mapping(platform, args.station))
-    sequence = platform.sequence_verdict(65534, 4)
+    platform.sequence_report("alpha", 65533)
+    platform.sequence_report("beta", 331)  # 错位上报：先入配对缓冲
+    clock.sleep(1.5)
+    platform.cycle(dt=1.0)  # 控制循环驱动静默配对
+    platform.sequence_report("alpha", 65534)
+    platform.sequence_report("beta", 332)
+    clock.sleep(1.5)
+    platform.cycle(dt=1.0)
+    sequence_wrap = platform.sequence_report("alpha", 2)  # 回绕前进
+    platform.sequence_report("beta", 336)
+    clock.sleep(1.5)
+    platform.cycle(dt=1.0)  # 第三次静默观测：偏移锁定并归并
+    sequence_replay = platform.sequence_report("alpha", 2)  # 同源重复：判重放
+    sequence = platform.sequence_report("alpha", 3)  # 干净前进，门控采信
+    sequence_status = platform.sequence_status()
     dwell = platform.register_dwell(args.train, 45.0, args.station)
     route = platform.assign_route(args.train, args.station, _next_station(platform, args.station), 1200)
     departure = platform.depart(args.train, args.station)
@@ -107,6 +121,13 @@ def _cmd_demo(args: argparse.Namespace) -> int:
         "fault": fault,
         "cleared": cleared,
         "sequence": sequence,
+        "sequence_wrap": sequence_wrap["verdict"]["kind"],
+        "sequence_replay": sequence_replay["verdict"]["kind"],
+        "sequence_gate": platform.sequence_gate(),
+        "sequence_status": {
+            key: sequence_status[key]
+            for key in ("horizon", "cycle", "reference", "degraded", "pending")
+        },
         "dwell": dwell,
         "route": route,
         "departure": departure,

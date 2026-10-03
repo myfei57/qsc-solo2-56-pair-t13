@@ -88,6 +88,28 @@ class InterlockSection:
 
 
 @dataclass(frozen=True)
+class SequenceSection:
+    """门控事件序号的多源对齐与判定限值。
+
+    ``commit_policy`` 二选一：``primary`` 以主源为准做单调校验（可用性优先），
+    ``quorum`` 要多数源一致才算干净前进（安全性优先）。``hold_s`` 是乱序缓冲
+    的判定窗口：窗口内等乱序补报，超时按缺口或降级落锤。
+    """
+
+    sources: tuple[str, ...] = ("alpha", "beta")
+    primary: str = "alpha"
+    commit_policy: str = "primary"
+    hold_s: float = 0.5
+    pair_window_s: float = 1.0
+    source_timeout_s: float = 5.0
+    max_forward_step: int = 64
+    offset_confirm: int = 3
+    pending_limit: int = 256
+    degraded_accept: bool = False
+    journal_segment: int = 512
+
+
+@dataclass(frozen=True)
 class QuotaSection:
     """运行配额。"""
 
@@ -122,6 +144,7 @@ class PlatformConfig:
     gap: GapSection = field(default_factory=GapSection)
     signal: SignalSection = field(default_factory=SignalSection)
     interlock: InterlockSection = field(default_factory=InterlockSection)
+    sequence: SequenceSection = field(default_factory=SequenceSection)
     quota: QuotaSection = field(default_factory=QuotaSection)
     audit: AuditSection = field(default_factory=AuditSection)
     console: ConsoleSection = field(default_factory=ConsoleSection)
@@ -165,6 +188,26 @@ class PlatformConfig:
             raise ConfigError("序号模数固定为 65536", component="config")
         if not 0 < self.interlock.max_locked_ratio <= 1:
             raise ConfigError("锁定比例上限必须落在 (0, 1]", component="config")
+        if len(self.sequence.sources) < 2:
+            raise ConfigError("序号采集源至少需要两路", component="config")
+        if self.sequence.primary not in self.sequence.sources:
+            raise ConfigError("主源必须落在采集源清单里", component="config")
+        if self.sequence.commit_policy not in ("primary", "quorum"):
+            raise ConfigError("序号提交策略必须是 primary 或 quorum", component="config")
+        if self.sequence.hold_s < 0:
+            raise ConfigError("乱序缓冲窗口不能为负", component="config")
+        if self.sequence.pair_window_s <= 0:
+            raise ConfigError("源配对窗口必须为正", component="config")
+        if self.sequence.source_timeout_s <= self.sequence.pair_window_s:
+            raise ConfigError("源静默阈值必须大于配对窗口", component="config")
+        if not 0 < self.sequence.max_forward_step < 32768:
+            raise ConfigError("单次可信前进上限必须落在 (0, 32768)", component="config")
+        if self.sequence.offset_confirm <= 0:
+            raise ConfigError("偏移确认次数必须为正", component="config")
+        if self.sequence.pending_limit <= 0:
+            raise ConfigError("乱序缓冲上限必须为正", component="config")
+        if self.sequence.journal_segment <= 0:
+            raise ConfigError("序号流水分段长度必须为正", component="config")
         if self.quota.arrival_limit <= 0 or self.quota.depart_limit <= 0:
             raise ConfigError("运行配额必须为正", component="config")
         if self.audit.journal_segment <= 0:
@@ -189,6 +232,8 @@ def _section(cls, payload: object):
     kwargs = {key: value for key, value in payload.items() if key in known}
     if cls is NamespaceSection and "stations" in kwargs:
         kwargs["stations"] = tuple(str(item) for item in kwargs["stations"])
+    if cls is SequenceSection and "sources" in kwargs:
+        kwargs["sources"] = tuple(str(item) for item in kwargs["sources"])
     return cls(**kwargs)
 
 
@@ -211,6 +256,7 @@ def config_to_mapping(config: PlatformConfig) -> dict:
         "gap": dict(config.gap.__dict__),
         "signal": dict(config.signal.__dict__),
         "interlock": dict(config.interlock.__dict__),
+        "sequence": dict(config.sequence.__dict__),
         "quota": dict(config.quota.__dict__),
         "audit": dict(config.audit.__dict__),
         "console": dict(config.console.__dict__),
@@ -231,6 +277,7 @@ def config_from_mapping(payload: dict) -> PlatformConfig:
         gap=_section(GapSection, payload.get("gap")),
         signal=_section(SignalSection, payload.get("signal")),
         interlock=_section(InterlockSection, payload.get("interlock")),
+        sequence=_section(SequenceSection, payload.get("sequence")),
         quota=_section(QuotaSection, payload.get("quota")),
         audit=_section(AuditSection, payload.get("audit")),
         console=_section(ConsoleSection, payload.get("console")),

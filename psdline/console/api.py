@@ -74,6 +74,7 @@ class Api:
         add("GET", "/api/mapping/{stationID}", self._mapping)
         add("GET", "/api/resolve", self._resolve)
         add("GET", "/api/readiness", self._readiness)
+        add("GET", "/api/sequence", lambda params, body: self._platform.sequence_status())
         add("POST", "/api/arrive", self._arrive)
         add("POST", "/api/depart", self._depart)
         add("POST", "/api/gap", self._gap)
@@ -86,6 +87,7 @@ class Api:
         add("POST", "/api/arm", self._arm)
         add("POST", "/api/position", self._position)
         add("POST", "/api/sequence", self._sequence)
+        add("POST", "/api/sequence-rebase", lambda params, body: self._platform.sequence_rebase())
         add("POST", "/api/cycle", self._cycle)
         add("POST", "/api/sweep", self._sweep)
         add("POST", "/api/dwell", self._dwell)
@@ -237,8 +239,8 @@ class Api:
         )
 
     def _sequence(self, params: dict, body: dict) -> dict:
-        return self._platform.sequence_verdict(
-            _as_int(body, "previous", 0), _as_int(body, "step", 1)
+        return self._platform.sequence_report(
+            _require(body, "source"), _as_int(body, "sequence", 0)
         )
 
     def _cycle(self, params: dict, body: dict) -> dict:

@@ -66,11 +66,13 @@ def test_fault_locks_gate_and_clear_releases(platform):
 
 
 def test_sequence_verdict_handles_rollover(platform):
-    rollover = platform.sequence_verdict(65534, 4)
+    platform.sequence_report("alpha", 65534)
+    rollover = platform.sequence_report("alpha", 2)
     assert rollover["ok"] is True
-    replay = platform.sequence_verdict(10, 0)
+    assert rollover["verdict"]["kind"] == "wraparound"
+    replay = platform.sequence_report("alpha", 2)
     assert replay["ok"] is False
-    assert replay["violations"] == ["replay"]
+    assert replay["verdict"]["kind"] == "replay"
 
 
 def test_refresh_position_rejects_out_of_range(platform):

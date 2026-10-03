@@ -40,6 +40,19 @@
     "hold_after_fault_s": 3.0,
     "max_locked_ratio": 0.5
   },
+  "sequence": {
+    "sources": ["alpha", "beta"],
+    "primary": "alpha",
+    "commit_policy": "primary",
+    "hold_s": 0.5,
+    "pair_window_s": 1.0,
+    "source_timeout_s": 5.0,
+    "max_forward_step": 64,
+    "offset_confirm": 3,
+    "pending_limit": 256,
+    "degraded_accept": false,
+    "journal_segment": 512
+  },
   "quota": {
     "arrival_limit": 1000,
     "depart_limit": 1000

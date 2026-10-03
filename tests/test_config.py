@@ -54,6 +54,48 @@ def test_config_rejects_missing_namespace_stations():
     assert PlatformConfig().validate() is not None
 
 
+def test_config_rejects_bad_sequence_section():
+    payload = config_to_mapping(default_config())
+    payload["sequence"]["commit_policy"] = "whatever"
+    with pytest.raises(ConfigError):
+        config_from_mapping(payload)
+    payload = config_to_mapping(default_config())
+    payload["sequence"]["primary"] = "gamma"
+    with pytest.raises(ConfigError):
+        config_from_mapping(payload)
+    payload = config_to_mapping(default_config())
+    payload["sequence"]["sources"] = ["alpha"]
+    with pytest.raises(ConfigError):
+        config_from_mapping(payload)
+    payload = config_to_mapping(default_config())
+    payload["sequence"]["source_timeout_s"] = 0.5
+    with pytest.raises(ConfigError):
+        config_from_mapping(payload)
+
+
+def test_config_rejects_bad_sequence_section():
+    payload = config_to_mapping(default_config())
+    payload["sequence"]["commit_policy"] = "whatever"
+    with pytest.raises(ConfigError):
+        config_from_mapping(payload)
+    payload = config_to_mapping(default_config())
+    payload["sequence"]["primary"] = "gamma"
+    with pytest.raises(ConfigError):
+        config_from_mapping(payload)
+    payload = config_to_mapping(default_config())
+    payload["sequence"]["sources"] = ["alpha"]
+    with pytest.raises(ConfigError):
+        config_from_mapping(payload)
+    payload = config_to_mapping(default_config())
+    payload["sequence"]["source_timeout_s"] = 0.5
+    with pytest.raises(ConfigError):
+        config_from_mapping(payload)
+    payload = config_to_mapping(default_config())
+    payload["sequence"]["max_forward_step"] = 40000
+    with pytest.raises(ConfigError):
+        config_from_mapping(payload)
+
+
 def test_load_config_from_file(tmp_path):
     path = tmp_path / "config.json"
     path.write_text(json.dumps(config_to_mapping(default_config())), encoding="utf-8")

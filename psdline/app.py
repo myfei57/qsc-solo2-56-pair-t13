@@ -36,11 +36,10 @@ from .ids import IdFactory
 from .interlock import (
     FaultRegistry,
     InterlockArmer,
+    SequenceAligner,
     interlock_status,
-    next_sequence,
     releasable,
     restore_lockouts,
-    verdict_of,
 )
 from .ns import Namespace, NamespaceRegistry
 from .platform import MappingRegistry, adjacent, group_keys, physical_groups, resolve
@@ -129,6 +128,21 @@ class Platform:
         self.gaps = GapRegistry(store)
         self.quotas = QuotaRegistry(store)
         self.commands = CommandLog(store)
+        self.sequences = SequenceAligner(
+            store,
+            self.clock,
+            JsonlJournal(store.root, "sequence", segment_limit=self.config.sequence.journal_segment),
+            sources=self.config.sequence.sources,
+            primary=self.config.sequence.primary,
+            commit_policy=self.config.sequence.commit_policy,
+            hold_s=self.config.sequence.hold_s,
+            pair_window_s=self.config.sequence.pair_window_s,
+            source_timeout_s=self.config.sequence.source_timeout_s,
+            max_forward_step=self.config.sequence.max_forward_step,
+            offset_confirm=self.config.sequence.offset_confirm,
+            pending_limit=self.config.sequence.pending_limit,
+            degraded_accept=self.config.sequence.degraded_accept,
+        )
         self.doors = DoorController(
             store, self.align, self.commands, self.gates, self.lockouts
         )
@@ -607,20 +621,45 @@ class Platform:
             self.audit.record("position_rejected", train_id, "", reason=outcome["reason"])
         return {**outcome, "violations": [] if outcome["ok"] else [outcome["reason"]]}
 
-    def sequence_verdict(self, previous: int, step: int) -> dict:
-        """推进门控事件序号并给出回绕判定。"""
+    def sequence_report(self, source: str, sequence: int) -> dict:
+        """接入一路门控事件序号上报：归到基准轴后判定前进、回绕或重放。"""
 
-        current = next_sequence(previous, step)
-        verdict = verdict_of(previous, current)
-        self.audit.record(
-            "sequence_verdict",
-            "",
-            "",
-            previous=verdict.previous,
-            current=verdict.current,
-            advanced=verdict.advanced,
-        )
-        return {"ok": verdict.advanced, "verdict": verdict.as_dict(), "violations": [] if verdict.advanced else [verdict.reason]}
+        outcome = self.sequences.report(str(source), int(sequence), self.clock.now())
+        self._audit_sequence(outcome["committed"], outcome["rejected"], outcome["events"])
+        verdict = outcome["verdict"].as_dict()
+        return {
+            "ok": bool(verdict["accepted"]),
+            "verdict": verdict,
+            "committed": [item.as_dict() for item in outcome["committed"]],
+            "gate": self.sequences.gate(self.clock.now()),
+            "violations": [] if verdict["accepted"] else [verdict["reason"]],
+        }
+
+    def sequence_status(self) -> dict:
+        """返回序号对齐状态；判定、审计与门控读的都是这一份。"""
+
+        return self.sequences.status(self.clock.now())
+
+    def sequence_gate(self) -> dict:
+        """返回门控读取的序号连续性结论。"""
+
+        return self.sequences.gate(self.clock.now())
+
+    def sequence_rebase(self) -> dict:
+        """双源同时重启后，把当前流位置人工锚定回已提交水位。"""
+
+        outcome = self.sequences.rebase(self.clock.now())
+        self._audit_sequence([], [], outcome["events"])
+        return {"ok": True, "status": self.sequences.status(self.clock.now()), "violations": []}
+
+    def _audit_sequence(self, committed: list, rejected: list, events: list) -> None:
+        """把对齐器的最终判定与事件写进审计，和门控读的是同一份结果。"""
+
+        for event in events:
+            detail = {key: value for key, value in event.items() if key != "at"}
+            self.audit.record("sequence_event", "", "", at=event.get("at"), **detail)
+        for verdict in list(committed) + list(rejected):
+            self.audit.record("sequence_verdict", "", "", at=verdict.at, verdict=verdict.as_dict())
 
     def batch_open(self, station_id: str) -> dict:
         """按布局里程顺序批量开门。"""
@@ -675,6 +714,8 @@ class Platform:
             return {"ok": False, "violations": ["步长必须为正"], "cycle": self._cycles}
         self._cycles += 1
         moment = self.clock.now()
+        flushed = self.sequences.flush(moment)
+        self._audit_sequence(flushed["committed"], flushed["rejected"], flushed["events"])
         stale = [
             train.id for train in self.trains.list() if self.positions.stale(train.id, moment)
         ]
@@ -697,6 +738,7 @@ class Platform:
             "can_release_depart": interlock["can_release_depart"],
             "ready_trains": holding,
             "gaps": gap_summary(self.gaps, [train.id for train in self.trains.list()]),
+            "sequence_pending": self.sequences.pending_count,
             "violations": [],
         }
 
@@ -741,6 +783,7 @@ class Platform:
             "interlock": interlock_status(
                 self.faults, self.gates, self.config.interlock.max_locked_ratio
             ),
+            "sequence": self.sequences.status(self.clock.now()),
             "gaps": gap_summary(self.gaps, ids),
             "quota": {
                 ARRIVAL: self.quotas.status(ARRIVAL),
